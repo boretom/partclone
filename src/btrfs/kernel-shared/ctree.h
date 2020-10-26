@@ -25,10 +25,11 @@
 #include "kernel-lib/list.h"
 #include "kerncompat.h"
 #include "kernel-lib/radix-tree.h"
-#include "extent-cache.h"
-#include "extent_io.h"
+#include "common/extent-cache.h"
+#include "kernel-shared/extent_io.h"
 #include "ioctl.h"
 #include "kernel-lib/sizes.h"
+#include "crypto/crc32c.h"
 #else
 #include <btrfs/list.h>
 #include <btrfs/kerncompat.h>
@@ -37,6 +38,7 @@
 #include <btrfs/extent_io.h>
 #include <btrfs/ioctl.h>
 #include <btrfs/sizes.h>
+#include <btrfs/crc32c.h>
 #endif /* BTRFS_FLAT_INCLUDES */
 
 struct btrfs_root;
@@ -569,7 +571,7 @@ struct btrfs_path {
 	struct extent_buffer *nodes[BTRFS_MAX_LEVEL];
 	int slots[BTRFS_MAX_LEVEL];
 #if 0
-	/* The kernel locking sheme is not done in userspace. */
+	/* The kernel locking scheme is not done in userspace. */
 	int locks[BTRFS_MAX_LEVEL];
 #endif
 	signed char reada;
@@ -1003,6 +1005,9 @@ enum btrfs_raid_types {
 /* used in struct btrfs_balance_args fields */
 #define BTRFS_AVAIL_ALLOC_BIT_SINGLE	(1ULL << 48)
 
+#define BTRFS_EXTENDED_PROFILE_MASK	(BTRFS_BLOCK_GROUP_PROFILE_MASK | \
+					 BTRFS_AVAIL_ALLOC_BIT_SINGLE)
+
 /*
  * GLOBAL_RSV does not exist as a on-disk block group type and is used
  * internally for exporting info about global block reserve from space infos
@@ -1032,6 +1037,7 @@ struct btrfs_qgroup_status_item {
 	__le64 rescan;		/* progress during scanning */
 } __attribute__ ((__packed__));
 
+#define BTRFS_QGROUP_STATUS_VERSION		1
 struct btrfs_block_group_item {
 	__le64 used;
 	__le64 chunk_objectid;
@@ -1099,11 +1105,11 @@ struct btrfs_space_info {
 	struct list_head list;
 };
 
-struct btrfs_block_group_cache {
-	struct cache_extent cache;
-	struct btrfs_key key;
+struct btrfs_block_group {
 	struct btrfs_space_info *space_info;
 	struct btrfs_free_space_ctl *free_space_ctl;
+	u64 start;
+	u64 length;
 	u64 used;
 	u64 bytes_super;
 	u64 pinned;
@@ -1111,16 +1117,21 @@ struct btrfs_block_group_cache {
 	int cached;
 	int ro;
 	/*
-         * If the free space extent count exceeds this number, convert the block
-         * group to bitmaps.
-         */
-        u32 bitmap_high_thresh;
-        /*
-         * If the free space extent count drops below this number, convert the
-         * block group back to extents.
-         */
-        u32 bitmap_low_thresh;
+	 * If the free space extent count exceeds this number, convert the block
+	 * group to bitmaps.
+	 */
+	u32 bitmap_high_thresh;
+	/*
+	 * If the free space extent count drops below this number, convert the
+	 * block group back to extents.
+	 */
+	u32 bitmap_low_thresh;
 
+	/* Block group cache stuff */
+	struct rb_node cache_node;
+
+	/* For dirty block groups */
+	struct list_head dirty_list;
 };
 
 struct btrfs_device;
@@ -1145,11 +1156,11 @@ struct btrfs_fs_info {
 
 	struct extent_io_tree extent_cache;
 	struct extent_io_tree free_space_cache;
-	struct extent_io_tree block_group_cache;
 	struct extent_io_tree pinned_extents;
 	struct extent_io_tree extent_ins;
 	struct extent_io_tree *excluded_extents;
 
+	struct rb_root block_group_cache_tree;
 	/* logical->physical extent mapping */
 	struct btrfs_mapping_tree mapping_tree;
 
@@ -1162,11 +1173,9 @@ struct btrfs_fs_info {
 	u64 data_alloc_profile;
 	u64 metadata_alloc_profile;
 	u64 system_alloc_profile;
-	u64 alloc_start;
 
 	struct btrfs_trans_handle *running_transaction;
 	struct btrfs_super_block *super_copy;
-	struct mutex fs_mutex;
 
 	u64 super_bytenr;
 	u64 total_pinned;
@@ -1188,11 +1197,11 @@ struct btrfs_fs_info {
 	unsigned int avoid_meta_chunk_alloc:1;
 	unsigned int avoid_sys_chunk_alloc:1;
 	unsigned int finalize_on_close:1;
+	unsigned int hide_names:1;
 
 	int transaction_aborted;
 
-	int (*free_extent_hook)(struct btrfs_fs_info *fs_info,
-				u64 bytenr, u64 num_bytes, u64 parent,
+	int (*free_extent_hook)(u64 bytenr, u64 num_bytes, u64 parent,
 				u64 root_objectid, u64 owner, u64 offset,
 				int refs_to_drop);
 	struct cache_tree *fsck_extent_cache;
@@ -1629,18 +1638,18 @@ static inline void btrfs_set_stripe_devid_nr(struct extent_buffer *eb,
 }
 
 /* struct btrfs_block_group_item */
-BTRFS_SETGET_STACK_FUNCS(block_group_used, struct btrfs_block_group_item,
+BTRFS_SETGET_STACK_FUNCS(stack_block_group_used, struct btrfs_block_group_item,
 			 used, 64);
-BTRFS_SETGET_FUNCS(disk_block_group_used, struct btrfs_block_group_item,
+BTRFS_SETGET_FUNCS(block_group_used, struct btrfs_block_group_item,
 			 used, 64);
-BTRFS_SETGET_STACK_FUNCS(block_group_chunk_objectid,
+BTRFS_SETGET_STACK_FUNCS(stack_block_group_chunk_objectid,
 			struct btrfs_block_group_item, chunk_objectid, 64);
 
-BTRFS_SETGET_FUNCS(disk_block_group_chunk_objectid,
+BTRFS_SETGET_FUNCS(block_group_chunk_objectid,
 		   struct btrfs_block_group_item, chunk_objectid, 64);
-BTRFS_SETGET_FUNCS(disk_block_group_flags,
+BTRFS_SETGET_FUNCS(block_group_flags,
 		   struct btrfs_block_group_item, flags, 64);
-BTRFS_SETGET_STACK_FUNCS(block_group_flags,
+BTRFS_SETGET_STACK_FUNCS(stack_block_group_flags,
 			struct btrfs_block_group_item, flags, 64);
 
 /* struct btrfs_free_space_info */
@@ -2504,6 +2513,20 @@ static inline int __btrfs_fs_compat_ro(struct btrfs_fs_info *fs_info, u64 flag)
 	((unsigned long)(btrfs_leaf_data(leaf) + \
 	btrfs_item_offset_nr(leaf, slot)))
 
+static inline u64 btrfs_name_hash(const char *name, int len)
+{
+	return crc32c((u32)~1, name, len);
+}
+
+/*
+ * Figure the key offset of an extended inode ref
+ */
+static inline u64 btrfs_extref_hash(u64 parent_objectid, const char *name,
+				    int len)
+{
+	return (u64)btrfs_crc32c(parent_objectid, name, len);
+}
+
 /* extent-tree.c */
 int btrfs_reserve_extent(struct btrfs_trans_handle *trans,
 			 struct btrfs_root *root,
@@ -2514,10 +2537,9 @@ int btrfs_fix_block_accounting(struct btrfs_trans_handle *trans);
 void btrfs_pin_extent(struct btrfs_fs_info *fs_info, u64 bytenr, u64 num_bytes);
 void btrfs_unpin_extent(struct btrfs_fs_info *fs_info,
 			u64 bytenr, u64 num_bytes);
-struct btrfs_block_group_cache *btrfs_lookup_block_group(struct
-							 btrfs_fs_info *info,
-							 u64 bytenr);
-struct btrfs_block_group_cache *btrfs_lookup_first_block_group(struct
+struct btrfs_block_group *btrfs_lookup_block_group(struct btrfs_fs_info *info,
+						   u64 bytenr);
+struct btrfs_block_group *btrfs_lookup_first_block_group(struct
 						       btrfs_fs_info *info,
 						       u64 bytenr);
 struct extent_buffer *btrfs_alloc_free_block(struct btrfs_trans_handle *trans,
@@ -2558,7 +2580,7 @@ int update_space_info(struct btrfs_fs_info *info, u64 flags,
 		      struct btrfs_space_info **space_info);
 int btrfs_free_block_groups(struct btrfs_fs_info *info);
 int btrfs_read_block_groups(struct btrfs_fs_info *info);
-struct btrfs_block_group_cache *
+struct btrfs_block_group *
 btrfs_add_block_group(struct btrfs_fs_info *fs_info, u64 bytes_used, u64 type,
 		      u64 chunk_offset, u64 size);
 int btrfs_make_block_group(struct btrfs_trans_handle *trans,
@@ -2566,20 +2588,20 @@ int btrfs_make_block_group(struct btrfs_trans_handle *trans,
 			   u64 type, u64 chunk_offset, u64 size);
 int btrfs_make_block_groups(struct btrfs_trans_handle *trans,
 			    struct btrfs_fs_info *fs_info);
-int btrfs_update_block_group(struct btrfs_root *root, u64 bytenr, u64 num,
-			     int alloc, int mark_free);
+int btrfs_update_block_group(struct btrfs_trans_handle *trans, u64 bytenr,
+			     u64 num, int alloc, int mark_free);
 int btrfs_record_file_extent(struct btrfs_trans_handle *trans,
 			      struct btrfs_root *root, u64 objectid,
 			      struct btrfs_inode_item *inode,
 			      u64 file_pos, u64 disk_bytenr,
 			      u64 num_bytes);
-int btrfs_free_block_group(struct btrfs_trans_handle *trans,
-			   struct btrfs_fs_info *fs_info, u64 bytenr, u64 len);
+int btrfs_remove_block_group(struct btrfs_trans_handle *trans,
+			     u64 bytenr, u64 len);
 void free_excluded_extents(struct btrfs_fs_info *fs_info,
-			   struct btrfs_block_group_cache *cache);
+			   struct btrfs_block_group *cache);
 int exclude_super_stripes(struct btrfs_fs_info *fs_info,
-			  struct btrfs_block_group_cache *cache);
-u64 add_new_free_space(struct btrfs_block_group_cache *block_group,
+			  struct btrfs_block_group *cache);
+u64 add_new_free_space(struct btrfs_block_group *block_group,
 		       struct btrfs_fs_info *info, u64 start, u64 end);
 u64 hash_extent_data_ref(u64 root_objectid, u64 owner, u64 offset);
 
@@ -2618,6 +2640,8 @@ int btrfs_copy_root(struct btrfs_trans_handle *trans,
 		      struct btrfs_root *root,
 		      struct extent_buffer *buf,
 		      struct extent_buffer **cow_ret, u64 new_root_objectid);
+int btrfs_create_root(struct btrfs_trans_handle *trans,
+		      struct btrfs_fs_info *fs_info, u64 objectid);
 int btrfs_extend_item(struct btrfs_root *root, struct btrfs_path *path,
 		u32 data_size);
 int btrfs_truncate_item(struct btrfs_root *root, struct btrfs_path *path,
@@ -2635,7 +2659,7 @@ int btrfs_search_slot_for_read(struct btrfs_root *root,
                                struct btrfs_path *p, int find_higher,
                                int return_any);
 int btrfs_bin_search(struct extent_buffer *eb, const struct btrfs_key *key,
-		     int level, int *slot);
+		     int *slot);
 int btrfs_find_item(struct btrfs_root *fs_root, struct btrfs_path *found_path,
 		u64 iobjectid, u64 ioff, u8 key_type,
 		struct btrfs_key *found_key);
@@ -2735,11 +2759,11 @@ struct btrfs_dir_item *btrfs_lookup_dir_item(struct btrfs_trans_handle *trans,
 					     struct btrfs_path *path, u64 dir,
 					     const char *name, int name_len,
 					     int mod);
-struct btrfs_dir_item *btrfs_lookup_dir_index(struct btrfs_trans_handle *trans,
-					      struct btrfs_root *root,
-					      struct btrfs_path *path, u64 dir,
-					      const char *name, int name_len,
-					      u64 index, int mod);
+struct btrfs_dir_item *btrfs_lookup_dir_index_item(struct btrfs_trans_handle *trans,
+					struct btrfs_root *root,
+					struct btrfs_path *path, u64 dir,
+					u64 objectid, const char *name, int name_len,
+					int mod);
 int btrfs_delete_one_dir_name(struct btrfs_trans_handle *trans,
 			      struct btrfs_root *root,
 			      struct btrfs_path *path,
@@ -2751,11 +2775,6 @@ int btrfs_insert_xattr_item(struct btrfs_trans_handle *trans,
 struct btrfs_dir_item *btrfs_match_dir_item_name(struct btrfs_root *root,
 			      struct btrfs_path *path,
 			      const char *name, int name_len);
-
-/* inode-map.c */
-int btrfs_find_free_objectid(struct btrfs_trans_handle *trans,
-			     struct btrfs_root *fs_root,
-			     u64 dirid, u64 *objectid);
 
 /* inode-item.c */
 int btrfs_insert_inode_ref(struct btrfs_trans_handle *trans,
@@ -2845,6 +2864,9 @@ int btrfs_mkdir(struct btrfs_trans_handle *trans, struct btrfs_root *root,
 		char *name, int namelen, u64 parent_ino, u64 *ino, int mode);
 struct btrfs_root *btrfs_mksubvol(struct btrfs_root *root, const char *base,
 				  u64 root_objectid, bool convert);
+int btrfs_find_free_objectid(struct btrfs_trans_handle *trans,
+			     struct btrfs_root *fs_root,
+			     u64 dirid, u64 *objectid);
 
 /* file.c */
 int btrfs_get_extent(struct btrfs_trans_handle *trans,

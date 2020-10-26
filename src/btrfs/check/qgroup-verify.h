@@ -20,11 +20,11 @@
 #define __BTRFS_QGROUP_VERIFY_H__
 
 #include "kerncompat.h"
-#include "ctree.h"
+#include "kernel-shared/ctree.h"
 
 int qgroup_verify_all(struct btrfs_fs_info *info);
-int report_qgroups(int all);
-int repair_qgroups(struct btrfs_fs_info *info, int *repaired);
+void report_qgroups(int all);
+int repair_qgroups(struct btrfs_fs_info *info, int *repaired, bool silent);
 
 int print_extent_state(struct btrfs_fs_info *info, u64 subvol);
 

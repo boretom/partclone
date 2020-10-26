@@ -22,9 +22,9 @@
 #include <getopt.h>
 #include <uuid/uuid.h>
 
-#include "btrfs/ctree.h"
-#include "btrfs/volumes.h"
-#include "btrfs/disk-io.h"
+#include "btrfs/kernel-shared/ctree.h"
+#include "btrfs/kernel-shared/volumes.h"
+#include "btrfs/kernel-shared/disk-io.h"
 #include "btrfs/common/utils.h"
 #include "btrfs/version.h"
 

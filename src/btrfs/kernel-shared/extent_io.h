@@ -21,7 +21,7 @@
 
 #if BTRFS_FLAT_INCLUDES
 #include "kerncompat.h"
-#include "extent-cache.h"
+#include "common/extent-cache.h"
 #include "kernel-lib/list.h"
 #else
 #include <btrfs/kerncompat.h>
@@ -46,8 +46,6 @@
 #define BLOCK_GROUP_DATA	(1U << 1)
 #define BLOCK_GROUP_METADATA	(1U << 2)
 #define BLOCK_GROUP_SYSTEM	(1U << 4)
-
-#define BLOCK_GROUP_DIRTY 	(1U)
 
 /*
  * The extent buffer bitmap operations are done with byte granularity instead of
@@ -91,7 +89,6 @@ struct extent_buffer {
 	struct cache_extent cache_node;
 	u64 start;
 	u64 dev_bytenr;
-	struct extent_io_tree *tree;
 	struct list_head lru;
 	struct list_head recow;
 	u32 len;

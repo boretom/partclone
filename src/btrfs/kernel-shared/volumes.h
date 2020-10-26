@@ -20,7 +20,7 @@
 #define __BTRFS_VOLUMES_H__
 
 #include "kerncompat.h"
-#include "ctree.h"
+#include "kernel-shared/ctree.h"
 
 #define BTRFS_STRIPE_LEN	SZ_64K
 
@@ -206,7 +206,7 @@ static inline enum btrfs_raid_types btrfs_bg_flags_to_raid_index(u64 flags)
 static inline int check_crossing_stripes(struct btrfs_fs_info *fs_info,
 					 u64 start, u64 len)
 {
-	struct btrfs_block_group_cache *bg_cache;
+	struct btrfs_block_group *bg_cache;
 	u64 bg_offset;
 
 	bg_cache = btrfs_lookup_block_group(fs_info, start);
@@ -216,7 +216,7 @@ static inline int check_crossing_stripes(struct btrfs_fs_info *fs_info,
 	 */
 	if (!bg_cache)
 		return 0;
-	bg_offset = start - bg_cache->key.objectid;
+	bg_offset = start - bg_cache->start;
 
 	return (bg_offset / BTRFS_STRIPE_LEN !=
 		(bg_offset + len - 1) / BTRFS_STRIPE_LEN);
